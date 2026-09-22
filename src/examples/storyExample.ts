@@ -161,7 +161,6 @@ class IntroduceConflictMove extends DesignMove {
  * Adds allies based on the type of conflict.
  */
 class AddAllyMove extends DesignMove {
-  private allyCounter = 0;
   private allies = [
     'wise mentor', 'loyal friend', 'mysterious stranger',
     'skilled warrior', 'clever thief', 'noble knight'
@@ -184,12 +183,11 @@ class AddAllyMove extends DesignMove {
   }
 
   execute(bindings: Bindings, blackboard: Blackboard): Fact[] {
-    const stateSeed = blackboard.getStateSeed();
-    const rng = new SimpleRandomGenerator(stateSeed + 4 + this.allyCounter);
+    const allyIndex = blackboard.count('ally');
+    const rng = blackboard.rng(['ally', allyIndex]);
 
     const ally = rng.choice(this.allies);
-    const allyId = `ally_${this.allyCounter}`;
-    this.allyCounter++;
+    const allyId = `ally_${allyIndex}`;
 
     return [
       new Fact('ally', [allyId, ally]),
@@ -202,7 +200,6 @@ class AddAllyMove extends DesignMove {
  * Creates obstacles based on setting atmosphere.
  */
 class CreateObstacleMove extends DesignMove {
-  private obstacleCounter = 0;
   private obstacles: Record<string, string[]> = {
     mysterious: ['hidden trap', 'riddle to solve', 'illusion to see through'],
     threatening: ['dangerous beast', 'hostile guards', 'treacherous path'],
@@ -238,14 +235,13 @@ class CreateObstacleMove extends DesignMove {
     const atmosphere = bindings.atmosphere as string;
     const location = bindings.location;
 
-    const stateSeed = blackboard.getStateSeed();
-    const rng = new SimpleRandomGenerator(stateSeed + 5 + this.obstacleCounter);
+    const obstacleIndex = blackboard.count('obstacle');
+    const rng = blackboard.rng(['obstacle', obstacleIndex]);
 
     const possibleObstacles = this.obstacles[atmosphere] || ['unexpected challenge'];
     const obstacle = rng.choice(possibleObstacles);
 
-    const obstacleId = `obstacle_${this.obstacleCounter}`;
-    this.obstacleCounter++;
+    const obstacleId = `obstacle_${obstacleIndex}`;
 
     return [
       new Fact('obstacle', [obstacleId, obstacle]),

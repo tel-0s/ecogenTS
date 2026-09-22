@@ -44,8 +44,6 @@ class SimpleWorldMove extends DesignMove {
  * Adds cities to worlds that don't have enough.
  */
 class AddCityMove extends DesignMove {
-  private cityCounter = 0;
-
   constructor(private maxCities: number = 3) {
     super('add-city', 5.0); // Medium priority
   }
@@ -71,8 +69,8 @@ class AddCityMove extends DesignMove {
 
   execute(bindings: Bindings, blackboard: Blackboard): Fact[] {
     const worldId = bindings.world_id;
-    const cityId = `city_${this.cityCounter}`;
-    this.cityCounter++;
+    // Derive the id from the blackboard (not a field on the move) so runs are reproducible.
+    const cityId = `city_${blackboard.count('city')}`;
 
     // Get world climate to influence city type
     const climateQuery = new Query(['world-climate', worldId, '?climate']);

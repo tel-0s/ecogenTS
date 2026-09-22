@@ -1,8 +1,8 @@
-import { Blackboard } from './Blackboard';
-import { DesignMove, ExecutableMove } from './DesignMove';
-import { SelectionStrategy, RandomSelectionStrategy } from './SelectionStrategy';
-import { Fact } from './Fact';
-import { Bindings } from './Query';
+import { Blackboard } from './Blackboard.js';
+import { DesignMove, ExecutableMove, normalizeMoveOutput } from './DesignMove.js';
+import { SelectionStrategy, RandomSelectionStrategy } from './SelectionStrategy.js';
+import { Fact } from './Fact.js';
+import { Bindings } from './Query.js';
 
 /**
  * Represents a single execution log entry.
@@ -10,7 +10,10 @@ import { Bindings } from './Query';
 export interface ExecutionLogEntry {
   moveName: string;
   bindings: Bindings;
+  /** Facts added by this move. */
   newFacts: Fact[];
+  /** Facts removed by this move (only those actually present on the blackboard). */
+  removedFacts: Fact[];
   iteration: number;
   timestamp: number;
 }
@@ -80,16 +83,18 @@ export class Orchestrator {
     }
     
     // 3. Execution: Run the selected move
-    const newFacts = selectedMove.execute(this.blackboard);
+    const { add: newFacts, remove } = normalizeMoveOutput(selectedMove.execute(this.blackboard));
     
-    // 4. Update: Add new facts to the blackboard
+    // 4. Update: apply removals, then additions
+    const removedFacts = remove.filter(fact => this.blackboard.removeFact(fact));
     this.blackboard.addFacts(newFacts);
     
     // Log the execution
     this._executionLog.push({
       moveName: selectedMove.move.name,
       bindings: selectedMove.bindings,
-      newFacts: newFacts,
+      newFacts,
+      removedFacts,
       iteration: this._iterationCount,
       timestamp: Date.now()
     });
@@ -140,7 +145,8 @@ export class Orchestrator {
         ? ` with ${JSON.stringify(entry.bindings)}`
         : '';
       lines.push(
-        `  ${index + 1}. ${entry.moveName}${bindingsStr} -> ${entry.newFacts.length} new facts`
+        `  ${index + 1}. ${entry.moveName}${bindingsStr} -> ${entry.newFacts.length} new facts` +
+          (entry.removedFacts.length > 0 ? `, ${entry.removedFacts.length} removed` : '')
       );
     });
     

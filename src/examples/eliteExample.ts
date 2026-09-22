@@ -23,8 +23,6 @@ import {
  * Creates initial planet seeds when none exist.
  */
 class MakePlanetSeedMove extends DesignMove {
-  private planetCounter = 0;
-
   constructor(private maxPlanets: number = 8) {
     super('make-planet-seed', 10.0); // High priority to run first
   }
@@ -38,12 +36,11 @@ class MakePlanetSeedMove extends DesignMove {
   }
 
   execute(bindings: Bindings, blackboard: Blackboard): Fact[] {
-    // Generate a deterministic seed based on blackboard state and counter
-    const stateSeed = blackboard.getStateSeed();
-    const rng = new SimpleRandomGenerator(stateSeed + this.planetCounter + 0x1000);
+    // Id and randomness both come from the blackboard, so runs are reproducible.
+    const planetIndex = blackboard.count('planet');
+    const rng = blackboard.rng(['planet-seed', planetIndex]);
     const seed = rng.randomInt(0, 0xFFFFFFFF);
-    const planetId = `planet_${this.planetCounter}`;
-    this.planetCounter++;
+    const planetId = `planet_${planetIndex}`;
 
     return [
       new Fact('planet', [planetId]),
