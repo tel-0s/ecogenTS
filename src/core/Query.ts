@@ -33,6 +33,12 @@ export class Query {
    * @param pattern - Either a string predicate or an array [predicate, ...args]
    *                  where args can include variables starting with '?'
    */
+  /**
+   * Per argument: the variable name (without '?'), null for an anonymous
+   * variable, or undefined for a literal. Precomputed so matching is cheap.
+   */
+  private readonly varNames: (string | null | undefined)[];
+
   constructor(pattern: string | readonly [string, ...any[]]) {
     if (typeof pattern === 'string') {
       this.predicate = pattern;
@@ -41,6 +47,9 @@ export class Query {
       this.predicate = pattern[0];
       this.args = pattern.slice(1);
     }
+    this.varNames = this.args.map(arg =>
+      !Query.isVariable(arg) ? undefined : Query.isAnonymous(arg) ? null : arg.substring(1),
+    );
   }
 
   /** Normalises any Pattern into a Query. */
@@ -75,39 +84,30 @@ export class Query {
       return null;
     }
 
-    let bindings: Bindings | null = null;
-    const lookup = (name: string): { found: boolean; value?: any } => {
-      if (bindings && name in bindings) return { found: true, value: bindings[name] };
-      if (existingBindings && name in existingBindings) {
-        return { found: true, value: existingBindings[name] };
-      }
-      return { found: false };
-    };
-
+    // Pass 1: reject cheaply, without allocating. Literals must match, and
+    // variables already bound by the caller must agree with the fact.
+    const names = this.varNames;
     for (let i = 0; i < this.args.length; i++) {
-      const queryArg = this.args[i];
-      const factArg = fact.args[i];
-
-      if (Query.isVariable(queryArg)) {
-        if (Query.isAnonymous(queryArg)) continue;
-        const varName = queryArg.substring(1);
-        const existing = lookup(varName);
-        if (existing.found) {
-          if (existing.value !== factArg) return null;
-        } else {
-          if (bindings === null) {
-            bindings = existingBindings ? { ...existingBindings } : {};
-          }
-          bindings[varName] = factArg;
-        }
-      } else if (queryArg !== factArg) {
-        // Literal - must match exactly
-        return null;
+      const name = names[i];
+      if (name === undefined) {
+        if (this.args[i] !== fact.args[i]) return null;
+      } else if (name !== null && existingBindings && name in existingBindings) {
+        if (existingBindings[name] !== fact.args[i]) return null;
       }
     }
 
-    if (bindings !== null) return bindings;
-    return existingBindings ? { ...existingBindings } : {};
+    // Pass 2: bind the remaining variables.
+    const bindings: Bindings = existingBindings ? { ...existingBindings } : {};
+    for (let i = 0; i < this.args.length; i++) {
+      const name = names[i];
+      if (!name) continue; // literal (undefined) or anonymous (null)
+      if (name in bindings) {
+        if (bindings[name] !== fact.args[i]) return null; // repeated variable
+      } else {
+        bindings[name] = fact.args[i];
+      }
+    }
+    return bindings;
   }
 
   /**

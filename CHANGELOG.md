@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1
+
+### Performance
+- `Query.matches` now rejects non-matching facts before allocating anything: literals and already-bound variables are checked first, and variable names are precomputed per query. Patterns with literals, such as `['land', '?s', 'verge', ...]`, get much cheaper. In The Held Hour's chunk generator this cut time per chunk by about a third.
+
+### Fixed
+- `bench/bench.js` resolved its dist path relative to its own folder, so the documented command failed. It now resolves relative to the working directory.
+
 ## 2.0.0
 
 ### Fixed
