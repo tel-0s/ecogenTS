@@ -38,8 +38,9 @@ class TestPlanetSizeMove extends DesignMove {
   *sensoryQuery(blackboard: Blackboard): IterableIterator<Bindings> {
     for (const binding of blackboard.query(new Query(['planet', '?id']))) {
       const planetId = binding.id;
-      // Only if planet doesn't have size yet
-      if (!blackboard.hasFact('planet-size', planetId)) {
+      // Only if planet doesn't have size yet. (hasFact needs exact args, and
+      // planet-size facts carry a size too, so match that position with '?_'.)
+      if (!blackboard.exists(['planet-size', planetId, '?_'])) {
         yield { planet_id: planetId };
       }
     }

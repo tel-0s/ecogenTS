@@ -16,6 +16,7 @@ Instead of fixed, linear pipelines, EcogenTS models generation as an ecosystem o
 - **Mixed-initiative generation** - Humans or AI can participate by adding facts or selecting moves
 - **Dynamic systems** - Supports modification during generation
 - **Type safety** - Full TypeScript support with comprehensive type definitions
+- **Runs anywhere** - No runtime dependencies; works in browsers, workers and Node (CommonJS + ES modules)
 
 ## Core Architecture
 
@@ -23,6 +24,8 @@ The system consists of three main components:
 
 ### 1. Blackboard
 The central data repository that stores all generated facts (artifacts). Facts are simple predicate-argument structures like `new Fact('planet', ['Earth'])` or `new Fact('distance', ['Earth', 'Mars', 50])`.
+
+Facts are indexed by predicate, exact lookups are O(1), and the state hash is maintained incrementally, so blackboards with tens of thousands of facts stay fast. Facts can be added and removed.
 
 ### 2. Design Moves
 Self-contained generative operations with two parts:
@@ -47,51 +50,44 @@ npm run build
 
 # Run tests
 npm test
+
+# Benchmark (n = world size; add `det` for deterministic selection)
+npm run build && node bench/bench.js ./dist 1000 det
 ```
 
 ## Quick Start
 
 ```typescript
-import {
-  DesignMove,
-  Fact,
-  Query,
-  Bindings,
-  Blackboard,
-  EcologicalGenerator
-} from 'ecogents';
+import { defineMove, Fact, EcologicalGenerator } from 'ecogents';
 
-// Define a simple design move
-class CreatePlanetMove extends DesignMove {
-  private planetCount = 0;
+// Create planets until there are three.
+const createPlanet = defineMove({
+  name: 'create-planet',
+  priority: 5.0,
+  query: [],                                     // no facts needed...
+  where: (_b, bb) => bb.count('planet') < 3,     // ...but only while there are fewer than 3
+  execute: (_b, bb) => [new Fact('planet', [`planet_${bb.count('planet')}`])],
+});
 
-  constructor() {
-    super('create-planet', 5.0); // name and priority
-  }
+// Give every planet without a size a size.
+const sizePlanet = defineMove({
+  name: 'size-planet',
+  query: [['planet', '?id']],
+  not: [['planet-size', '?id', '?_']],           // '?_' matches anything
+  execute: ({ id }, bb) => [
+    new Fact('planet-size', [id, bb.rng(['size', id]).choice(['small', 'medium', 'large'])]),
+  ],
+});
 
-  *sensoryQuery(blackboard: Blackboard): IterableIterator<Bindings> {
-    // Only create planets if we have fewer than 3
-    if (blackboard.getFacts('planet').length < 3) {
-      yield { create: true };
-    }
-  }
-
-  execute(bindings: Bindings, blackboard: Blackboard): Fact[] {
-    const planetName = `planet_${this.planetCount}`;
-    this.planetCount++;
-    return [new Fact('planet', [planetName])];
-  }
-}
-
-// Create and run generator
 const generator = new EcologicalGenerator();
-generator.addDesignMove(new CreatePlanetMove());
+generator.addDesignMoves([createPlanet, sizePlanet]);
 
-// Generate and view results
 const blackboard = generator.generate();
 blackboard.facts.forEach(fact => console.log(fact.toString()));
-// Output: (planet planet_0), (planet planet_1), (planet planet_2)
+// (planet planet_0), (planet-size planet_0 large), (planet planet_1), ...
 ```
+
+Moves can also be written as subclasses of `DesignMove` with a `sensoryQuery` generator and an `execute` method; see [Key Classes](#key-classes).
 
 ## Examples
 
@@ -164,11 +160,38 @@ console.log(fact.toString()); // Output: (distance Earth Mars 50)
 ```
 
 ### Query
-Pattern for matching facts with variable binding:
+Pattern for matching a single fact with variable binding. Anywhere a query is
+accepted you can also pass a plain array (`['planet', '?name']`) or a predicate string.
 ```typescript
-const query = new Query(['planet', '?name']); // Matches any planet, binds name
-const bindings = Array.from(blackboard.query(query)); 
+const bindings = Array.from(blackboard.query(['planet', '?name']));
 // [{ name: 'Earth' }, { name: 'Mars' }]
+```
+
+- `?name` binds a variable; using it twice means both positions must be equal.
+- `?_` (or any `?_something`) is an anonymous wildcard: it matches anything and is not bound.
+
+### Joins, negation and filters
+`blackboard.match` joins several patterns, which covers what the thesis does with Datalog queries:
+```typescript
+// Every planet with each of its moons...
+blackboard.match([['planet', '?p'], ['moon', '?p', '?m']]);
+
+// ...planets that have no size yet (negation, like Datalog's `missing?`)...
+blackboard.match([['planet', '?p']], { not: [['planet-size', '?p', '?_']] });
+
+// ...or anything else, via an arbitrary filter.
+blackboard.match([['planet', '?p']], { where: (b, bb) => bb.count(['moon', b.p, '?_']) > 1 });
+```
+Other helpers: `exists(pattern)`, `count(predicate | pattern)`, `queryOne(pattern)`, `hasFact(predicate, ...args)`.
+
+### Removing facts
+```typescript
+blackboard.removeFact(new Fact('alive', ['wolf']));   // one instance
+blackboard.retract(['alive', '?_']);                  // every match
+
+// A design move may return { add, remove } instead of a list of facts.
+// Removals are applied first and recorded in the execution log.
+execute: ({ who }) => ({ remove: [new Fact('alive', [who])], add: [new Fact('shadow', [who])] })
 ```
 
 ### DesignMove
@@ -234,23 +257,25 @@ const result2 = gen2.generate();
 // result1.facts equals result2.facts
 ```
 
-**Important**: For true determinism, design moves must derive their randomness from the blackboard state rather than using global random functions:
+**Important**: For true determinism, keep all state on the blackboard:
+
+- take randomness from `blackboard.rng(salt)`, never from `Math.random()`;
+- derive ids from the blackboard (e.g. `blackboard.count('planet')`), never from counters stored on the move.
 
 ```typescript
-// Non-deterministic (uses global random state)
-execute(bindings: Bindings, blackboard: Blackboard): Fact[] {
-  const value = Math.random(); // BAD: Non-deterministic
-  return [new Fact('random-value', [value])];
+// BAD: global randomness and state hidden on the move
+execute(bindings, blackboard) {
+  return [new Fact('tile', [this.counter++, Math.random()])];
 }
 
-// Deterministic (uses blackboard state)
-execute(bindings: Bindings, blackboard: Blackboard): Fact[] {
-  const stateSeed = blackboard.getStateSeed();
-  const rng = new SimpleRandomGenerator(stateSeed + someOffset);
-  const value = rng.random(); // GOOD: Deterministic
-  return [new Fact('random-value', [value])];
+// GOOD: everything derived from the blackboard
+execute(bindings, blackboard) {
+  const id = blackboard.count('tile');
+  return [new Fact('tile', [id, blackboard.rng(['tile', id]).random()])];
 }
 ```
+
+The state hash is order-independent and identical on every platform (no Node `crypto`, no locale-sensitive sorting).
 
 ## Advanced Features
 
@@ -362,25 +387,49 @@ class Query {
 
 #### `Blackboard`
 ```typescript
+type Pattern = Query | string | [string, ...any[]];
+
 class Blackboard {
+  readonly facts: readonly Fact[];      // frozen snapshot, insertion order
+  readonly size: number;
+  readonly version: number;             // increments on every change
   addFact(fact: Fact): void;
   addFacts(facts: Fact[]): void;
-  query(query: Query): IterableIterator<Bindings>;
-  queryOne(query: Query): Bindings | null;
+  removeFact(fact: Fact): boolean;
+  removeFacts(facts: Fact[]): number;
+  retract(pattern: Pattern, bindings?: Bindings): Fact[];
+  query(pattern: Pattern, bindings?: Bindings): IterableIterator<Bindings>;
+  queryOne(pattern: Pattern, bindings?: Bindings): Bindings | null;
+  match(patterns: Pattern[], options?: { not?: Pattern[]; where?: (b, bb) => boolean; bindings?: Bindings }): IterableIterator<Bindings>;
+  exists(pattern: Pattern, bindings?: Bindings): boolean;
+  count(pattern: Pattern, bindings?: Bindings): number;
   hasFact(predicate: string, ...args: any[]): boolean;
   getFacts(predicate?: string): Fact[];
-  getStateHash(): string;
-  getStateSeed(): number;
+  getStateHash(): string;               // 16 hex digits
+  getStateSeed(): number;               // unsigned 32-bit
+  rng(salt?: unknown): SimpleRandomGenerator;
+  clone(): Blackboard;
 }
 ```
 
 #### `DesignMove`
 ```typescript
+type MoveOutput = Fact[] | { add?: Fact[]; remove?: Fact[] };
+
 abstract class DesignMove {
   constructor(name: string, priority: number = 1.0);
-  abstract sensoryQuery(blackboard: Blackboard): IterableIterator<Bindings>;
-  abstract execute(bindings: Bindings, blackboard: Blackboard): Fact[];
+  abstract sensoryQuery(blackboard: Blackboard): Iterable<Bindings>;
+  abstract execute(bindings: Bindings, blackboard: Blackboard): MoveOutput;
 }
+
+function defineMove(spec: {
+  name: string;
+  priority?: number;
+  query: Pattern[] | ((bb: Blackboard) => Iterable<Bindings>);
+  not?: Pattern[];
+  where?: (bindings: Bindings, bb: Blackboard) => boolean;
+  execute: (bindings: Bindings, bb: Blackboard) => MoveOutput;
+}): DesignMove;
 ```
 
 #### `EcologicalGenerator`
@@ -405,8 +454,7 @@ EcogenTS is written in TypeScript and provides full type definitions. All exampl
 This is a research implementation demonstrating the EGS architecture. Extensions and improvements are welcome, particularly:
 
 - Additional selection strategies
-- More sophisticated query patterns  
-- Performance optimizations
+- Incremental (Rete-style) matching, so moves are not re-queried every step
 - Additional examples and use cases
 - Better TypeScript generic support
 

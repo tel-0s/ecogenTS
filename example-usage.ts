@@ -18,8 +18,6 @@ import {
 console.log('=== Example 1: Basic Planet Generation ===\n');
 
 class CreatePlanetMove extends DesignMove {
-  private planetCount = 0;
-
   constructor() {
     super('create-planet', 5.0);
   }
@@ -31,8 +29,8 @@ class CreatePlanetMove extends DesignMove {
   }
 
   execute(bindings: Bindings, blackboard: Blackboard): Fact[] {
-    const planetName = `planet_${this.planetCount}`;
-    this.planetCount++;
+    // Derive ids from the blackboard, not from state on the move.
+    const planetName = `planet_${blackboard.count('planet')}`;
     return [new Fact('planet', [planetName])];
   }
 }

@@ -1,8 +1,8 @@
-import { Blackboard } from './Blackboard';
-import { DesignMove } from './DesignMove';
-import { SelectionStrategy, RandomSelectionStrategy } from './SelectionStrategy';
-import { Orchestrator, ExecutionLogEntry } from './Orchestrator';
-import { Fact } from './Fact';
+import { Blackboard } from './Blackboard.js';
+import { DesignMove } from './DesignMove.js';
+import { SelectionStrategy, RandomSelectionStrategy } from './SelectionStrategy.js';
+import { Orchestrator, ExecutionLogEntry } from './Orchestrator.js';
+import { Fact } from './Fact.js';
 
 /**
  * Function type for rendering a blackboard state.

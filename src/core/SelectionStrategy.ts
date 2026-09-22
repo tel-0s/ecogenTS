@@ -1,56 +1,11 @@
-import { ExecutableMove } from './DesignMove';
-import { Blackboard } from './Blackboard';
+import type { ExecutableMove } from './DesignMove.js';
+import type { Blackboard } from './Blackboard.js';
+import { SimpleRandomGenerator } from './random.js';
+import type { RandomGenerator } from './random.js';
 
-/**
- * Random number generator interface for consistent usage across strategies.
- */
-export interface RandomGenerator {
-  /**
-   * Returns a random number between 0 (inclusive) and 1 (exclusive).
-   */
-  random(): number;
-  
-  /**
-   * Returns a random integer between min (inclusive) and max (exclusive).
-   */
-  randomInt(min: number, max: number): number;
-  
-  /**
-   * Randomly selects an element from an array.
-   */
-  choice<T>(array: T[]): T;
-}
-
-/**
- * Simple random generator using Math.random or a seeded alternative.
- */
-export class SimpleRandomGenerator implements RandomGenerator {
-  private seed: number;
-  
-  constructor(seed?: number) {
-    this.seed = seed ?? Math.floor(Math.random() * 0x7FFFFFFF);
-  }
-  
-  /**
-   * Simple linear congruential generator for deterministic randomness.
-   */
-  random(): number {
-    // LCG parameters from Numerical Recipes
-    this.seed = (this.seed * 1664525 + 1013904223) % 0x100000000;
-    return this.seed / 0x100000000;
-  }
-  
-  randomInt(min: number, max: number): number {
-    return Math.floor(this.random() * (max - min)) + min;
-  }
-  
-  choice<T>(array: T[]): T {
-    if (array.length === 0) {
-      throw new Error('Cannot choose from empty array');
-    }
-    return array[this.randomInt(0, array.length)];
-  }
-}
+// Re-exported for backwards compatibility; these now live in ./random.
+export type { RandomGenerator } from './random.js';
+export { SimpleRandomGenerator };
 
 /**
  * Abstract base class for move selection strategies.
@@ -135,7 +90,7 @@ export class DeterministicSelectionStrategy extends SelectionStrategy {
     
     // Get deterministic seed from blackboard state
     const stateSeed = blackboard.getStateSeed();
-    const combinedSeed = this.baseSeed ^ stateSeed; // Combine with base seed
+    const combinedSeed = (this.baseSeed ^ stateSeed) >>> 0; // Combine with base seed
     
     // Create a temporary random generator with the deterministic seed
     const rng = new SimpleRandomGenerator(combinedSeed);
@@ -149,8 +104,9 @@ export class DeterministicSelectionStrategy extends SelectionStrategy {
       return { sortKey, move };
     });
     
-    // Sort for deterministic ordering
-    stableMoves.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    // Sort for deterministic ordering. Plain code-unit comparison, NOT
+    // localeCompare, so the order is identical on every machine.
+    stableMoves.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
     
     // Select using the seeded random generator
     const selected = rng.choice(stableMoves);
