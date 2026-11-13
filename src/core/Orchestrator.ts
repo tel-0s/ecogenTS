@@ -63,14 +63,11 @@ export class Orchestrator {
    * @returns True if a move was executed, false if no moves available
    */
   step(): boolean {
-    // 1. Filtering: Find all executable moves
-    const executableMoves: ExecutableMove[] = [];
-    
-    for (const move of this.designMoves) {
-      for (const bindings of move.sensoryQuery(this.blackboard)) {
-        executableMoves.push(new ExecutableMove(move, bindings));
-      }
-    }
+    // 1. Filtering: Find all executable moves (or, for a strategy that only
+    // looks at the highest priority, those of the highest priority that has any)
+    const executableMoves = this.selectionStrategy.highestPriorityOnly
+      ? this.highestExecutable()
+      : this.allExecutable(this.designMoves);
     
     if (executableMoves.length === 0) {
       return false; // No moves can be executed
@@ -104,6 +101,32 @@ export class Orchestrator {
     return true;
   }
   
+  private allExecutable(moves: readonly DesignMove[]): ExecutableMove[] {
+    const out: ExecutableMove[] = [];
+    for (const move of moves) {
+      for (const bindings of move.currentBindings(this.blackboard)) {
+        out.push(new ExecutableMove(move, bindings));
+      }
+    }
+    return out;
+  }
+
+  /** The executable moves of the highest priority that has any, in the moves' original order. */
+  private highestExecutable(): ExecutableMove[] {
+    const byPriority = new Map<number, DesignMove[]>();
+    for (const move of this.designMoves) {
+      const group = byPriority.get(move.priority);
+      if (group === undefined) byPriority.set(move.priority, [move]);
+      else group.push(move);
+    }
+    const priorities = [...byPriority.keys()].sort((a, b) => b - a);
+    for (const priority of priorities) {
+      const found = this.allExecutable(byPriority.get(priority)!);
+      if (found.length > 0) return found;
+    }
+    return [];
+  }
+
   /**
    * Runs the generation process until no more moves can be executed or max steps reached.
    * @param maxSteps - Optional override for maximum steps

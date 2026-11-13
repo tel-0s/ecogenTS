@@ -4,6 +4,35 @@ import { hashString, hash32, toHex32 } from './hash.js';
 import { SimpleRandomGenerator } from './random.js';
 
 /**
+ * What a piece of code read from a blackboard: the predicates it queried, each
+ * with the version it had, and whether it read the whole board. Made by
+ * {@link Blackboard.track}. While {@link Reads.fresh} is true, running the same
+ * code again (if it reads nothing but the blackboard) gives the same result.
+ */
+export class Reads {
+  /** predicate -> its version when first read */
+  readonly predicates = new Map<string, number>();
+  /** The board's version when code read the whole board (`facts`, `size`, `rng`...), else -1. */
+  all = -1;
+
+  /** True while nothing this code read has changed. */
+  fresh(blackboard: Blackboard): boolean {
+    if (this.all !== -1 && blackboard.version !== this.all) return false;
+    for (const [predicate, version] of this.predicates) {
+      if (blackboard.versionOf(predicate) !== version) return false;
+    }
+    return true;
+  }
+
+  /** True if the code read this predicate (or the whole board). */
+  has(predicate: string): boolean {
+    return this.all !== -1 || this.predicates.has(predicate);
+  }
+}
+
+const NO_FACTS: ReadonlySet<Fact> = new Set();
+
+/**
  * Options for multi-pattern matching with {@link Blackboard.match}.
  */
 export interface MatchOptions {
@@ -25,16 +54,27 @@ export interface MatchOptions {
  *
  * Performance characteristics:
  * - facts are indexed by predicate, so a query only scans facts of its predicate;
+ * - a query that binds an argument (a literal or an already-bound variable)
+ *   uses a hash index on that argument position. Indexes are built the first
+ *   time a query needs them and kept up to date after that;
  * - a fully ground pattern (no unbound variables) is an O(1) lookup;
+ * - adding and removing a fact are O(1) plus the number of indexes on its predicate;
  * - the state hash is an order-independent multiset hash maintained
  *   incrementally, so {@link getStateHash} / {@link getStateSeed} are O(1).
+ *
+ * Query results come in insertion order, with or without an index.
  *
  * Do not mutate the blackboard while iterating one of its query generators.
  */
 export class Blackboard {
-  private _facts: Fact[] = [];
-  private _byPredicate = new Map<string, Fact[]>();
-  private _counts = new Map<string, number>();
+  private _facts = new Set<Fact>();
+  private _byPredicate = new Map<string, Set<Fact>>();
+  /** Stored instances per fact key, oldest first (the blackboard is a multiset). */
+  private _byKey = new Map<string, Fact[]>();
+  /** predicate -> argument position -> value -> facts, in insertion order. */
+  private _indexes = new Map<string, Map<number, Map<unknown, Set<Fact>>>>();
+  private _predicateVersions = new Map<string, number>();
+  private _trackers: Reads[] = [];
   private _snapshot: readonly Fact[] | null = null;
   private _hashLo = 0;
   private _hashHi = 0;
@@ -45,15 +85,17 @@ export class Blackboard {
    * Returns a frozen snapshot; it is cached until the blackboard changes.
    */
   get facts(): readonly Fact[] {
+    this._readAll();
     if (this._snapshot === null) {
-      this._snapshot = Object.freeze(this._facts.slice());
+      this._snapshot = Object.freeze([...this._facts]);
     }
     return this._snapshot;
   }
 
   /** Number of facts on the blackboard. */
   get size(): number {
-    return this._facts.length;
+    this._readAll();
+    return this._facts.size;
   }
 
   /** Increments on every change. Useful for cheap dirty-checking. */
@@ -62,22 +104,63 @@ export class Blackboard {
   }
 
   /**
+   * Increments whenever a fact of this predicate is added or removed.
+   * Never decreases, even when the last fact of the predicate goes.
+   */
+  versionOf(predicate: string): number {
+    return this._predicateVersions.get(predicate) ?? 0;
+  }
+
+  /**
+   * Runs `fn` and records what it read from this blackboard. Use it to cache a
+   * result for as long as {@link Reads.fresh} holds. Only reads through this
+   * blackboard's methods are recorded, so `fn` must not depend on anything else
+   * that can change. Tracking nests: an outer `track` also records what an
+   * inner one read.
+   */
+  track<T>(fn: () => T): { value: T; reads: Reads } {
+    const reads = new Reads();
+    this._trackers.push(reads);
+    try {
+      return { value: fn(), reads };
+    } finally {
+      this._trackers.splice(this._trackers.lastIndexOf(reads), 1);
+    }
+  }
+
+  /**
    * Adds a new fact to the blackboard. Duplicates are allowed (the blackboard is a multiset).
    * @param fact - The fact to add
    */
   addFact(fact: Fact): void {
-    this._facts.push(fact);
+    // The same instance twice is two copies of the fact: store a twin.
+    if (this._facts.has(fact)) fact = new Fact(fact.predicate, [...fact.args]);
+    this._facts.add(fact);
     let bucket = this._byPredicate.get(fact.predicate);
     if (bucket === undefined) {
-      bucket = [];
+      bucket = new Set();
       this._byPredicate.set(fact.predicate, bucket);
     }
-    bucket.push(fact);
-    this._counts.set(fact.key, (this._counts.get(fact.key) ?? 0) + 1);
+    bucket.add(fact);
+    const copies = this._byKey.get(fact.key);
+    if (copies === undefined) this._byKey.set(fact.key, [fact]);
+    else copies.push(fact);
+    const indexes = this._indexes.get(fact.predicate);
+    if (indexes !== undefined) {
+      for (const [position, index] of indexes) {
+        const value = fact.args[position];
+        let set = index.get(value);
+        if (set === undefined) {
+          set = new Set();
+          index.set(value, set);
+        }
+        set.add(fact);
+      }
+    }
     const [lo, hi] = fact.hash;
     this._hashLo = (this._hashLo + lo) >>> 0;
     this._hashHi = (this._hashHi + hi) >>> 0;
-    this._changed();
+    this._changed(fact.predicate);
   }
 
   /**
@@ -93,23 +176,31 @@ export class Blackboard {
    * @returns True if a matching fact was found and removed
    */
   removeFact(fact: Fact): boolean {
-    const count = this._counts.get(fact.key);
-    if (!count) return false;
+    const copies = this._byKey.get(fact.key);
+    if (copies === undefined) return false;
 
-    const bucket = this._byPredicate.get(fact.predicate)!;
-    const bi = bucket.findIndex(f => f.key === fact.key);
-    const stored = bucket[bi];
-    bucket.splice(bi, 1);
-    if (bucket.length === 0) this._byPredicate.delete(fact.predicate);
-    this._facts.splice(this._facts.indexOf(stored), 1);
-
-    if (count === 1) this._counts.delete(fact.key);
-    else this._counts.set(fact.key, count - 1);
+    // The oldest stored copy goes.
+    const stored = copies.shift()!;
+    if (copies.length === 0) this._byKey.delete(fact.key);
+    const bucket = this._byPredicate.get(stored.predicate)!;
+    bucket.delete(stored);
+    if (bucket.size === 0) this._byPredicate.delete(stored.predicate);
+    this._facts.delete(stored);
+    const indexes = this._indexes.get(stored.predicate);
+    if (indexes !== undefined) {
+      for (const [position, index] of indexes) {
+        const value = stored.args[position];
+        const set = index.get(value);
+        if (set === undefined) continue;
+        set.delete(stored);
+        if (set.size === 0) index.delete(value);
+      }
+    }
 
     const [lo, hi] = fact.hash;
     this._hashLo = (this._hashLo - lo) >>> 0;
     this._hashHi = (this._hashHi - hi) >>> 0;
-    this._changed();
+    this._changed(stored.predicate);
     return true;
   }
 
@@ -129,9 +220,11 @@ export class Blackboard {
    */
   retract(pattern: Pattern, bindings?: Bindings): Fact[] {
     const query = Query.from(pattern);
-    const bucket = this._byPredicate.get(query.predicate);
-    if (!bucket) return [];
-    const doomed = bucket.filter(f => query.matches(f, bindings) !== null);
+    this._read(query.predicate);
+    const doomed: Fact[] = [];
+    for (const fact of this._candidates(query.predicate, query.substitute(bindings).args)) {
+      if (query.matches(fact, bindings) !== null) doomed.push(fact);
+    }
     for (const fact of doomed) this.removeFact(fact);
     return doomed;
   }
@@ -144,21 +237,62 @@ export class Blackboard {
    */
   *query(pattern: Pattern, bindings?: Bindings): IterableIterator<Bindings> {
     const query = Query.from(pattern);
+    this._read(query.predicate);
 
     // Fully ground pattern: O(1) lookup, one result per stored copy.
     const { args, ground } = query.substitute(bindings);
     if (ground) {
-      const n = this._counts.get(Fact.keyOf(query.predicate, args)) ?? 0;
+      const n = this._byKey.get(Fact.keyOf(query.predicate, args))?.length ?? 0;
       for (let i = 0; i < n; i++) yield bindings ? { ...bindings } : {};
       return;
     }
 
-    const bucket = this._byPredicate.get(query.predicate);
-    if (!bucket) return;
-    for (const fact of bucket) {
+    for (const fact of this._candidates(query.predicate, args)) {
       const result = query.matches(fact, bindings);
       if (result !== null) yield result;
     }
+  }
+
+  /**
+   * The facts a pattern can match: the smallest index bucket among its bound
+   * argument positions, or every fact of the predicate when none is bound.
+   * `args` is the pattern with bindings substituted.
+   */
+  private _candidates(predicate: string, args: readonly any[]): ReadonlySet<Fact> {
+    const bucket = this._byPredicate.get(predicate);
+    if (bucket === undefined) return NO_FACTS;
+    let best: ReadonlySet<Fact> = bucket;
+    for (let i = 0; i < args.length; i++) {
+      if (Query.isVariable(args[i])) continue;
+      const set = this._index(predicate, bucket, i).get(args[i]);
+      if (set === undefined) return NO_FACTS;
+      if (set.size < best.size) best = set;
+    }
+    return best;
+  }
+
+  /** The index on one argument position of a predicate, built on first use. */
+  private _index(predicate: string, bucket: ReadonlySet<Fact>, position: number): Map<unknown, Set<Fact>> {
+    let indexes = this._indexes.get(predicate);
+    if (indexes === undefined) {
+      indexes = new Map();
+      this._indexes.set(predicate, indexes);
+    }
+    let index = indexes.get(position);
+    if (index === undefined) {
+      index = new Map();
+      for (const fact of bucket) {
+        const value = fact.args[position];
+        let set = index.get(value);
+        if (set === undefined) {
+          set = new Set();
+          index.set(value, set);
+        }
+        set.add(fact);
+      }
+      indexes.set(position, index);
+    }
+    return index;
   }
 
   /**
@@ -223,7 +357,8 @@ export class Blackboard {
    */
   count(pattern: Pattern, bindings?: Bindings): number {
     if (typeof pattern === 'string') {
-      return this._byPredicate.get(pattern)?.length ?? 0;
+      this._read(pattern);
+      return this._byPredicate.get(pattern)?.size ?? 0;
     }
     let n = 0;
     for (const _ of this.query(pattern, bindings)) n++;
@@ -235,7 +370,8 @@ export class Blackboard {
    * For partial matches use {@link exists} with '?_' wildcards.
    */
   hasFact(predicate: string, ...args: any[]): boolean {
-    return (this._counts.get(Fact.keyOf(predicate, args)) ?? 0) > 0;
+    this._read(predicate);
+    return this._byKey.has(Fact.keyOf(predicate, args));
   }
 
   /**
@@ -245,13 +381,17 @@ export class Blackboard {
    */
   getFacts(predicate?: string): Fact[] {
     if (predicate === undefined) {
-      return this._facts.slice();
+      this._readAll();
+      return [...this._facts];
     }
-    return this._byPredicate.get(predicate)?.slice() ?? [];
+    this._read(predicate);
+    const bucket = this._byPredicate.get(predicate);
+    return bucket ? [...bucket] : [];
   }
 
   /** All predicates currently present on the blackboard. */
   predicates(): string[] {
+    this._readAll();
     return [...this._byPredicate.keys()];
   }
 
@@ -260,6 +400,7 @@ export class Blackboard {
    * Independent of insertion order; identical across platforms. O(1).
    */
   getStateHash(): string {
+    this._readAll();
     const [a, b] = this._mixedState();
     return toHex32(a) + toHex32(b);
   }
@@ -268,6 +409,7 @@ export class Blackboard {
    * Deterministic unsigned 32-bit seed derived from the blackboard contents. O(1).
    */
   getStateSeed(): number {
+    this._readAll();
     return this._mixedState()[0];
   }
 
@@ -288,17 +430,17 @@ export class Blackboard {
    * Returns a string representation of the blackboard.
    */
   toString(): string {
-    return `Blackboard(${this._facts.length} facts)`;
+    return `Blackboard(${this._facts.size} facts)`;
   }
 
   /**
    * Returns a detailed string representation of the blackboard.
    */
   toDetailedString(): string {
-    if (this._facts.length === 0) {
+    if (this._facts.size === 0) {
       return 'Blackboard:\n  (empty)';
     }
-    const factsStr = this._facts.map(fact => `  ${fact.toString()}`).join('\n');
+    const factsStr = [...this._facts].map(fact => `  ${fact.toString()}`).join('\n');
     return `Blackboard:\n${factsStr}`;
   }
 
@@ -306,12 +448,15 @@ export class Blackboard {
    * Clears all facts from the blackboard.
    */
   clear(): void {
-    this._facts = [];
+    const predicates = [...this._byPredicate.keys()];
+    this._facts = new Set();
     this._byPredicate.clear();
-    this._counts.clear();
+    this._byKey.clear();
+    this._indexes.clear();
     this._hashLo = 0;
     this._hashHi = 0;
-    this._changed();
+    for (const predicate of predicates) this._bump(predicate);
+    this._changed(null);
   }
 
   /**
@@ -319,23 +464,42 @@ export class Blackboard {
    */
   clone(): Blackboard {
     const copy = new Blackboard();
-    copy._facts = this._facts.slice();
+    copy._facts = new Set(this._facts);
     for (const [predicate, bucket] of this._byPredicate) {
-      copy._byPredicate.set(predicate, bucket.slice());
+      copy._byPredicate.set(predicate, new Set(bucket));
     }
-    copy._counts = new Map(this._counts);
+    for (const [key, copies] of this._byKey) copy._byKey.set(key, copies.slice());
     copy._hashLo = this._hashLo;
     copy._hashHi = this._hashHi;
     return copy;
   }
 
-  private _changed(): void {
+  private _changed(predicate: string | null): void {
     this._snapshot = null;
     this._version++;
+    if (predicate !== null) this._bump(predicate);
+  }
+
+  private _bump(predicate: string): void {
+    this._predicateVersions.set(predicate, (this._predicateVersions.get(predicate) ?? 0) + 1);
+  }
+
+  /** Records a read of one predicate in every active {@link track}. */
+  private _read(predicate: string): void {
+    for (const reads of this._trackers) {
+      if (!reads.predicates.has(predicate)) reads.predicates.set(predicate, this.versionOf(predicate));
+    }
+  }
+
+  /** Records a read of the whole board in every active {@link track}. */
+  private _readAll(): void {
+    for (const reads of this._trackers) {
+      if (reads.all === -1) reads.all = this._version;
+    }
   }
 
   /** Final avalanche over the running multiset sums (plus size, so {} != {x, x^-1}). */
   private _mixedState(): [number, number] {
-    return hashString(`${this._hashLo}:${this._hashHi}:${this._facts.length}`);
+    return hashString(`${this._hashLo}:${this._hashHi}:${this._facts.size}`);
   }
 }

@@ -213,6 +213,49 @@ class MyMove extends DesignMove {
 }
 ```
 
+### Remembering query results
+
+Every orchestrator step asks every move for its bindings. Most steps change
+only a few predicates, so most answers are the same as last time. A move with
+`memoize` on keeps its last bindings, and runs its query again only when a
+predicate the query read has changed:
+
+```typescript
+const plant = defineMove({
+  name: 'plant',
+  memoize: true,
+  query: [['seed', '?n']],
+  not: [['plant', '?n']],
+  execute: ({ n }) => [new Fact('plant', [n])],
+});
+```
+
+Turn it on only for a query that reads nothing but the blackboard: no fields
+on the move that change, no `Math.random()`. The blackboard records what the
+query reads (see `track` below). A query that reads the whole board
+(`facts`, `size`, `getStateSeed`, `rng`) runs again after any change.
+
+The building blocks are public:
+
+```typescript
+blackboard.versionOf('seed');               // goes up on every add or remove of a 'seed' fact
+const { value, reads } = blackboard.track(() => blackboard.count(['seed', '?n']));
+reads.fresh(blackboard);                    // true while no 'seed' fact was added or removed
+```
+
+### Performance
+
+- Facts are indexed by predicate. A query that binds an argument (a literal,
+  or a variable bound by an earlier pattern in a join) also uses a hash index
+  on that argument position. Indexes are built the first time a query needs
+  them. Results come in insertion order either way.
+- A fully ground pattern is a constant-time lookup. Adding and removing a fact
+  take constant time per index on its predicate.
+- With `PrioritySelectionStrategy` and `DeterministicPrioritySelectionStrategy`
+  (`highestPriorityOnly`), the orchestrator asks moves in priority order and
+  stops at the first priority that has an executable move. Lower moves do not
+  run their queries on that step.
+
 ### Selection Strategies
 
 Control which executable move runs next:

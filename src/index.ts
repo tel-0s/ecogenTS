@@ -12,7 +12,7 @@
 export { Fact } from './core/Fact.js';
 export { Query } from './core/Query.js';
 export type { Bindings, Pattern } from './core/Query.js';
-export { Blackboard } from './core/Blackboard.js';
+export { Blackboard, Reads } from './core/Blackboard.js';
 export type { MatchOptions } from './core/Blackboard.js';
 
 // Design moves
