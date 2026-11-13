@@ -13,6 +13,15 @@ export { SimpleRandomGenerator };
  */
 export abstract class SelectionStrategy {
   /**
+   * True if the strategy only ever picks among the moves of the highest
+   * priority present. The orchestrator then asks moves in priority order and
+   * stops at the first priority that has an executable move, so lower moves
+   * do not run their queries on that step. The list it passes keeps the
+   * moves' original order.
+   */
+  readonly highestPriorityOnly: boolean = false;
+
+  /**
    * Selects which executable move to run next.
    * @param executableMoves - List of moves that can be executed
    * @param blackboard - Current blackboard state
@@ -48,6 +57,7 @@ export class RandomSelectionStrategy extends SelectionStrategy {
  * Higher priority moves are always selected over lower priority ones.
  */
 export class PrioritySelectionStrategy extends SelectionStrategy {
+  override readonly highestPriorityOnly = true;
   private rng: RandomGenerator;
   
   constructor(seed?: number) {
@@ -74,6 +84,52 @@ export class PrioritySelectionStrategy extends SelectionStrategy {
 }
 
 /**
+ * Sort keys of executable moves, cached per bindings object. Memoized moves
+ * hand the orchestrator the same bindings objects step after step, so each
+ * key is computed once.
+ */
+const sortKeys = new WeakMap<object, { name: string; key: string }>();
+
+function sortKeyOf(move: ExecutableMove): string {
+  const bindings = move.bindings;
+  const cached = sortKeys.get(bindings);
+  if (cached !== undefined && cached.name === move.move.name) return cached.key;
+  const key = `${move.move.name}:${JSON.stringify(bindings, Object.keys(bindings).sort())}`;
+  sortKeys.set(bindings, { name: move.move.name, key });
+  return key;
+}
+
+/**
+ * The element that would be at index `k` if `items` were sorted by key
+ * (plain code-unit order), found in O(n) on average instead of sorting.
+ * Equal keys come from equal moves, so which of them is returned does not matter.
+ */
+function selectKth<T>(items: { key: string; item: T }[], k: number): T {
+  let lo = 0;
+  let hi = items.length - 1;
+  while (lo < hi) {
+    const pivot = items[(lo + hi) >>> 1].key;
+    let i = lo;
+    let j = hi;
+    while (i <= j) {
+      while (items[i].key < pivot) i++;
+      while (items[j].key > pivot) j--;
+      if (i <= j) {
+        const t = items[i];
+        items[i] = items[j];
+        items[j] = t;
+        i++;
+        j--;
+      }
+    }
+    if (k <= j) hi = j;
+    else if (k >= i) lo = i;
+    else break;
+  }
+  return items[k].item;
+}
+
+/**
  * Deterministic selection strategy that uses blackboard state hashing.
  * This ensures that given the same initial conditions and design moves,
  * the generator will always produce the same output.
@@ -95,22 +151,12 @@ export class DeterministicSelectionStrategy extends SelectionStrategy {
     // Create a temporary random generator with the deterministic seed
     const rng = new SimpleRandomGenerator(combinedSeed);
     
-    // Create a stable ordering of moves for deterministic selection
-    // Sort by move name and binding values to ensure consistent ordering
-    const stableMoves = executableMoves.map(move => {
-      // Create a stable sort key from move name and bindings
-      const bindingKey = JSON.stringify(move.bindings, Object.keys(move.bindings).sort());
-      const sortKey = `${move.move.name}:${bindingKey}`;
-      return { sortKey, move };
-    });
-    
-    // Sort for deterministic ordering. Plain code-unit comparison, NOT
-    // localeCompare, so the order is identical on every machine.
-    stableMoves.sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0));
-    
-    // Select using the seeded random generator
-    const selected = rng.choice(stableMoves);
-    return selected.move;
+    // Order the moves by name and bindings, so the choice does not depend on
+    // the order the moves came in. Plain code-unit comparison, NOT
+    // localeCompare, so the order is identical on every machine. The seeded
+    // random index picks a place in that order, and only that element is found.
+    const keyed = executableMoves.map(move => ({ key: sortKeyOf(move), item: move }));
+    return selectKth(keyed, rng.randomInt(0, keyed.length));
   }
 }
 
@@ -120,6 +166,7 @@ export class DeterministicSelectionStrategy extends SelectionStrategy {
  * for deterministic tiebreaking when multiple moves have the same priority.
  */
 export class DeterministicPrioritySelectionStrategy extends SelectionStrategy {
+  override readonly highestPriorityOnly = true;
   private deterministicSelector: DeterministicSelectionStrategy;
   
   constructor(baseSeed: number = 0) {

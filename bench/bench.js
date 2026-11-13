@@ -1,6 +1,6 @@
-// Usage: node bench/bench.js [path-to-dist] <n> [det]
+// Usage (from the repo root): node bench/bench.js [path-to-dist] <n> [det]
 // Two moves over a growing world: make tiles, then give each tile a biome.
-const E = require(process.argv[2] ?? '../dist');
+const E = require(require('path').resolve(process.argv[2] ?? 'dist'));
 const n = +process.argv[3];
 const det = process.argv[4] === 'det';
 class Make extends E.DesignMove {

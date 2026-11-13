@@ -1,5 +1,5 @@
 import { Fact } from './Fact.js';
-import { Blackboard, MatchOptions } from './Blackboard.js';
+import { Blackboard, MatchOptions, Reads } from './Blackboard.js';
 import { Bindings, Pattern } from './Query.js';
 
 /**
@@ -35,6 +35,16 @@ export function normalizeMoveOutput(output: MoveOutput): Required<MoveResult> {
  */
 export abstract class DesignMove {
   /**
+   * When true, {@link currentBindings} caches this move's bindings per
+   * blackboard and reuses them while nothing its query read has changed (see
+   * {@link Blackboard.track}). The orchestrator then skips the query on steps
+   * that did not touch its predicates. Only turn this on when the query reads
+   * nothing but the blackboard.
+   */
+  memoize = false;
+  private readonly _memo = new WeakMap<Blackboard, { reads: Reads; bindings: readonly Bindings[] }>();
+
+  /**
    * Creates a new DesignMove.
    * @param name - The name of this design move
    * @param priority - Priority for selection (higher = more likely to be selected)
@@ -59,6 +69,20 @@ export abstract class DesignMove {
    * @param blackboard - The current blackboard state
    */
   abstract execute(bindings: Bindings, blackboard: Blackboard): MoveOutput;
+
+  /**
+   * Every binding of this move on the blackboard as it is now. The orchestrator
+   * calls this once per move per step. With {@link memoize} on, a cached result
+   * is returned while it is still fresh. Do not mutate the returned array.
+   */
+  currentBindings(blackboard: Blackboard): readonly Bindings[] {
+    if (!this.memoize) return Array.from(this.sensoryQuery(blackboard));
+    const cached = this._memo.get(blackboard);
+    if (cached !== undefined && cached.reads.fresh(blackboard)) return cached.bindings;
+    const { value, reads } = blackboard.track(() => Array.from(this.sensoryQuery(blackboard)));
+    this._memo.set(blackboard, { reads, bindings: value });
+    return value;
+  }
 
   /**
    * Checks if this design move can be executed given the current blackboard state.
@@ -102,6 +126,8 @@ export interface MoveSpec {
   not?: MatchOptions['not'];
   /** Extra filter on bindings (only used when `query` is a pattern list). */
   where?: MatchOptions['where'];
+  /** Cache the bindings while the predicates the query read are unchanged. See {@link DesignMove.memoize}. */
+  memoize?: boolean;
   execute: (bindings: Bindings, blackboard: Blackboard) => MoveOutput;
 }
 
@@ -118,7 +144,7 @@ export interface MoveSpec {
  */
 export function defineMove(spec: MoveSpec): DesignMove {
   const { query, not, where } = spec;
-  return new (class extends DesignMove {
+  const move = new (class extends DesignMove {
     sensoryQuery(blackboard: Blackboard): Iterable<Bindings> {
       if (typeof query === 'function') return query(blackboard);
       return blackboard.match(query, { not, where });
@@ -127,6 +153,8 @@ export function defineMove(spec: MoveSpec): DesignMove {
       return spec.execute(bindings, blackboard);
     }
   })(spec.name, spec.priority ?? 1.0);
+  move.memoize = spec.memoize ?? false;
+  return move;
 }
 
 /**

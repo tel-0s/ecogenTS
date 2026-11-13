@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.1.0
+
+### Performance
+- **Field indexes.** A query that binds an argument uses a hash index on that argument position, built on first use and kept current. Joins and `not` patterns no longer scan the whole predicate for each row. Results keep insertion order, so generation output is unchanged.
+- **Constant-time removal.** Facts are kept in insertion-ordered sets, not arrays, so `removeFact` no longer scans every fact.
+- **Priority strategies stop early.** `PrioritySelectionStrategy` and `DeterministicPrioritySelectionStrategy` set `highestPriorityOnly`. The orchestrator then asks moves in priority order and stops at the first priority with an executable move. The chosen move is the same.
+- **Deterministic selection without a full sort.** The tie-break finds the chosen element with a quickselect, and caches each bindings object's sort key. The chosen move is the same.
+- In hackerbois, a world 10 times its usual size generated in 1.5 s instead of 61 s, with an identical result.
+
+### Added
+- `Blackboard.versionOf(predicate)`: a per-predicate change counter.
+- `Blackboard.track(fn)` and `Reads`: record which predicates code read, and test whether they changed since.
+- `DesignMove.memoize` (and `defineMove({ memoize })`) with `DesignMove.currentBindings`: keep a move's bindings while nothing its query read has changed. The orchestrator uses `currentBindings`.
+- `SelectionStrategy.highestPriorityOnly`.
+
+### Changed
+- Adding the same `Fact` instance twice stores a structurally equal copy for the second one (the blackboard is still a multiset).
+
+## 2.0.1
+
+### Performance
+- `Query.matches` now rejects non-matching facts before allocating anything: literals and already-bound variables are checked first, and variable names are precomputed per query. Patterns with literals, such as `['land', '?s', 'verge', ...]`, get much cheaper. In The Held Hour's chunk generator this cut time per chunk by about a third.
+
+### Fixed
+- `bench/bench.js` resolved its dist path relative to its own folder, so the documented command failed. It now resolves relative to the working directory.
+
 ## 2.0.0
 
 ### Fixed
